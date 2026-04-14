@@ -1,0 +1,6 @@
+*.pt
+*.pth
+*.npy
+*.pkl
+data/
+outputs/
