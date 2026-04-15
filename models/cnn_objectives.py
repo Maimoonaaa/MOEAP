@@ -75,8 +75,8 @@ def train_model(h5_path="data/pet_dataset.h5",
 
     train_ds = PETDataset(h5_path, "train", objective_idx)
     val_ds   = PETDataset(h5_path, "val",   objective_idx)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=2)
-    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=2)
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 
     model = ObjectiveCNN().to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)

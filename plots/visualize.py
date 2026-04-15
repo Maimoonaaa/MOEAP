@@ -4,9 +4,8 @@ import matplotlib.pyplot as plt
 
 def plot_pareto_front(obj_vals, fronts, em_results, map_results,
                       cnn_models, device, A, sinogram,
-                      objectives, save_path="results/pareto_front.png"):
-    from optimizer.moeap import MOEAP, poisson_ll
-    from models.cnn_objectives import evaluate_cnn_objectives
+                      objectives, moeap_obj=None, save_path="results/pareto_front.png"):
+    from optimizer.moeap import MOEAP, poisson_ll,evaluate_cnn_objectives
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -38,8 +37,8 @@ def plot_pareto_front(obj_vals, fronts, em_results, map_results,
 
     # Right: KKTPM per generation
     ax = axes[1]
-    if hasattr(moeap_global, 'obj_history'):
-        medians = [np.median(front) for front in moeap_global.obj_history]
+    if hasattr(moeap_obj, 'obj_history'):
+        medians = [np.median(front) for front in moeap_obj.obj_history]
         ax.plot(medians, 'k-')
         ax.set_xlabel("Generation")
         ax.set_ylabel("Median KKTPM")
