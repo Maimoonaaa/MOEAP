@@ -1,26 +1,10 @@
 # optimizer/kktpm.py
 import numpy as np
 
-def compute_kktpm(obj_values, population, evaluate_fn, h=1e-4):
+def compute_kktpm(obj_values, population, evaluate_fn, h=1e-3):
     """
-    Karush-Kuhn-Tucker Proximity Measure (Section III-C).
-    Measures closeness of solutions to the Pareto-optimal front.
-
-    For each solution x in a nondominated front:
-      KKTPM(x) = min over lambda>=0, ||lambda||=1 of ||grad_L||
-    where L = -sum_m lambda_m * f_m(x) is the Lagrangian.
-
-    We approximate gradients numerically with finite differences
-    on the flattened image vector.
-
-    Args:
-        obj_values : (N, M) array of objective values
-        population : list of N images (H, W arrays)
-        evaluate_fn: callable, takes image → (M,) objective array
-        h          : finite difference step
-
-    Returns:
-        kktpm_vals: (N,) array of KKTPM values, range [0, 1]
+    KKTPM: measures closeness to Pareto-optimal front.
+    Values should decrease toward 0 as solutions converge.
     """
     N, M = obj_values.shape
     kktpm_vals = np.zeros(N)
@@ -29,41 +13,48 @@ def compute_kktpm(obj_values, population, evaluate_fn, h=1e-4):
         flat = img.flatten()
         n_params = len(flat)
 
-        # Numerical gradient for each objective — sub-sample for speed
-        # Sample at most 500 random parameters per image
+        # Sample a small number of parameters for speed
         sample_idx = np.random.choice(n_params,
-                                      size=min(500, n_params),
+                                      size=min(50, n_params),
                                       replace=False)
         grads = np.zeros((M, len(sample_idx)))
 
         for k, pidx in enumerate(sample_idx):
-            flat_plus = flat.copy(); flat_plus[pidx] += h
+            flat_plus  = flat.copy(); flat_plus[pidx]  += h
             flat_minus = flat.copy(); flat_minus[pidx] -= h
             obj_plus  = evaluate_fn(flat_plus.reshape(img.shape))
             obj_minus = evaluate_fn(flat_minus.reshape(img.shape))
-            grads[:, k] = (obj_plus - obj_minus) / (2*h)
+            grads[:, k] = (obj_plus - obj_minus) / (2 * h)
 
-        # Find optimal lambda (convex hull projection)
-        # Min ||sum_m lambda_m * grad_m||^2, lambda>=0, sum=1
-        # Solve via projected gradient descent on lambda simplex
-        G = grads @ grads.T    # (M, M)
+        # Normalise each gradient row to unit scale
+        for m in range(M):
+            gn = np.linalg.norm(grads[m])
+            if gn > 1e-10:
+                grads[m] /= gn
+
+        # Optimal lambda via projected gradient descent on simplex
+        G = grads @ grads.T   # (M, M)
         lambda_vec = np.ones(M) / M
-
-        for _ in range(200):
+        lr = 0.05
+        for _ in range(300):
             grad_lambda = G @ lambda_vec
-            lambda_vec = lambda_vec - 0.01 * grad_lambda
-            # Project onto probability simplex
+            lambda_vec = lambda_vec - lr * grad_lambda
             lambda_vec = _project_simplex(lambda_vec)
 
-        # KKTPM = ||grad L|| normalised
-        weighted_grad = sum(lambda_vec[m] * grads[m] for m in range(M))
-        kktpm_vals[i] = np.linalg.norm(weighted_grad) / (np.linalg.norm(grads) + 1e-8)
+        # KKTPM = norm of weighted gradient sum (should → 0 at optimum)
+        weighted_grad = np.zeros(len(sample_idx))
+        for m in range(M):
+            weighted_grad += lambda_vec[m] * grads[m]
+        kktpm_vals[i] = float(np.linalg.norm(weighted_grad))
 
+    # Normalise to [0, 1]
+    max_val = kktpm_vals.max()
+    if max_val > 1e-10:
+        kktpm_vals /= max_val
     return kktpm_vals
 
 
 def _project_simplex(v):
-    """Project vector v onto the probability simplex sum=1, v>=0."""
     n = len(v)
     u = np.sort(v)[::-1]
     cssv = np.cumsum(u)
@@ -73,7 +64,6 @@ def _project_simplex(v):
 
 
 def kktpm_summary(kktpm_vals):
-    """Print the 5-number summary used in Fig. 16 of the paper."""
     print(f"  KKTPM — min={kktpm_vals.min():.4f}  "
           f"Q1={np.percentile(kktpm_vals,25):.4f}  "
           f"med={np.median(kktpm_vals):.4f}  "

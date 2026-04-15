@@ -1,8 +1,7 @@
 # optimizer/moeap.py
 import numpy as np
 from copy import deepcopy
-
-# ── Nondominated sorting (NSGA-II fast sort) ──────────────────────────────────
+from optimizer.kktpm import compute_kktpm
 
 def nondominated_sort(obj_values):
     """
@@ -59,7 +58,6 @@ def crowding_distance(obj_values, front):
     return distances
 
 
-# ── Genetic operators ─────────────────────────────────────────────────────────
 
 def simulated_binary_crossover(parent1, parent2, eta_c=20, p_cross=0.95):
     """SBX on flattened image arrays (paper uses eta_c=20, Pc=0.95)."""
@@ -76,23 +74,22 @@ def simulated_binary_crossover(parent1, parent2, eta_c=20, p_cross=0.95):
 
 def directed_mutation(image, sinogram, system_matrix, strength=0.01):
     """
-    Directed mutation: gradient step toward higher Poisson LL,
-    then add small Gaussian noise. Mimics paper's directed mutation.
+    Directed mutation: small gradient step toward higher Poisson LL
+    + Gaussian noise. Clamp to reasonable emission range [0, 5].
     """
     grad = poisson_ll_gradient(image, sinogram, system_matrix)
+    # Normalise gradient to avoid exploding steps
+    grad_norm = np.linalg.norm(grad)
+    if grad_norm > 1e-8:
+        grad = grad / grad_norm
     mutated = image + strength * grad
-    mutated += np.random.randn(*image.shape) * strength * 0.1
-    mutated = np.clip(mutated, 0, None)  # non-negative emission
+    mutated += np.random.randn(*image.shape) * strength * 0.05
+    # Clamp: non-negative, and cap at 5× the sinogram-implied mean
+    upper = max(5.0, image.mean() * 10)
+    mutated = np.clip(mutated, 0, upper)
     return mutated
 
-
-# ── Poisson log-likelihood and gradient ───────────────────────────────────────
-
 def poisson_ll(image, sinogram, system_matrix, scatter_randoms=None):
-    """
-    Eq. 3 from paper: sum_i( -y_bar_i + y_i * log(y_bar_i) )
-    system_matrix: (M, N) sparse forward projector (simplified 2D here)
-    """
     img_flat = image.flatten()
     y_bar = system_matrix @ img_flat
     if scatter_randoms is not None:
@@ -113,8 +110,6 @@ def poisson_ll_gradient(image, sinogram, system_matrix, scatter_randoms=None):
     return grad.reshape(image.shape)
 
 
-# ── CNN objective evaluation (wraps PyTorch models) ──────────────────────────
-
 def evaluate_cnn_objectives(image, cnn_models, device, img_size=64):
     """
     Evaluate all CNN models on a single image.
@@ -129,9 +124,6 @@ def evaluate_cnn_objectives(image, cnn_models, device, img_size=64):
         for name, model in cnn_models.items():
             results[name] = model(tensor).item()
     return results
-
-
-# ── Main MOEAP loop (Algorithm 1 from paper) ──────────────────────────────────
 
 class MOEAP:
     def __init__(self, sinogram, system_matrix,
@@ -151,19 +143,17 @@ class MOEAP:
         self.max_gen = max_gen
         self.H = self.W = img_size
         self.eta_c = eta_c
+        self.kktpm_history = []
         self.p_cross = p_cross
-
-        # Initialise population around FBP (uniform noise centred at FBP)
         fbp = self._fbp_init()
         self.population = [
             np.clip(fbp + np.random.uniform(-0.1, 0.1, fbp.shape), 0, None)
             for _ in range(self.N)
         ]
 
-        self.obj_history = []   # track Pareto front per generation
+        self.obj_history = []
 
     def _fbp_init(self):
-        """Simple backprojection as initialisation."""
         y = self.sinogram.flatten()
         bp = self.A.T @ y
         return (bp / (bp.max() + 1e-8)).reshape(self.H, self.W)
@@ -183,7 +173,6 @@ class MOEAP:
         return np.array([self._evaluate(img) for img in pop])
 
     def _select_parents(self, obj_values, fronts):
-        """Binary tournament selection by rank, then crowding distance."""
         N = self.N
         rank = np.zeros(len(obj_values), dtype=int)
         for r, front in enumerate(fronts):
@@ -222,15 +211,10 @@ class MOEAP:
                 Q.append(c2.reshape(self.H, self.W))
             Q = Q[:self.N]
 
-            # Evaluate offspring
             obj_Q = self._evaluate_population(Q)
-
-            # Combine parent + offspring (size 2N), nondominated sort
             R = P + Q
             obj_R = np.vstack([obj_P, obj_Q])
             fronts_R = nondominated_sort(obj_R)
-
-            # Select next generation (Algorithm 1, lines 9-21)
             new_P, new_obj = [], []
             for front in fronts_R:
                 if len(new_P) + len(front) <= self.N:
@@ -238,7 +222,6 @@ class MOEAP:
                         new_P.append(R[idx])
                         new_obj.append(obj_R[idx])
                 else:
-                    # Fill remaining slots using crowding distance
                     needed = self.N - len(new_P)
                     cd = crowding_distance(obj_R, front)
                     sorted_front = sorted(zip(cd, front),
@@ -257,7 +240,14 @@ class MOEAP:
                 front0 = obj_P[fronts[0]]
                 print(f"  Gen {gen:4d} | front size={len(fronts[0])} "
                       f"| obj means={front0.mean(axis=0).round(3)}")
-
+        self.kktpm_history.append(
+            np.median(compute_kktpm(
+                obj_P[fronts[0]][:5],          # only 5 front solutions
+                [P[i] for i in fronts[0][:5]],
+                self._evaluate,
+                h=1e-3
+            ))
+        )
         self.population = P
         self.obj_values = obj_P
         self.fronts = fronts

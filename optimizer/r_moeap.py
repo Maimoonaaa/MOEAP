@@ -3,16 +3,11 @@ import numpy as np
 from optimizer.moeap import MOEAP, nondominated_sort, simulated_binary_crossover, directed_mutation
 
 class RMOEAP(MOEAP):
-    """
-    Reference point-based extension (Section III-B).
-    Focuses the Pareto front exploration around one or more reference points.
-    """
 
     def __init__(self, *args, reference_points=None, epsilon=0.1, **kwargs):
         super().__init__(*args, **kwargs)
-        # reference_points: list of arrays of length M (number of objectives)
         self.ref_points = reference_points or []
-        self.epsilon = epsilon   # clearance radius around accepted solutions
+        self.epsilon = epsilon
 
     def _proximity_to_refs(self, obj_vec):
         """Minimum Euclidean distance from obj_vec to any reference point."""
@@ -23,10 +18,7 @@ class RMOEAP(MOEAP):
         return min(dists)
 
     def _select_from_front(self, obj_R, front, needed):
-        """
-        From a given front, pick `needed` solutions closest to
-        reference points, then enforce epsilon-clearance diversity.
-        """
+        
         proxs = [(self._proximity_to_refs(obj_R[i]), i) for i in front]
         proxs.sort(key=lambda x: x[0])
 
@@ -35,7 +27,6 @@ class RMOEAP(MOEAP):
         for prox, idx in proxs:
             if len(selected) >= needed:
                 break
-            # Enforce diversity: skip if too close to already-accepted solution
             too_close = any(
                 np.linalg.norm(obj_R[idx] - av) < self.epsilon
                 for av in accepted_vecs
@@ -43,8 +34,6 @@ class RMOEAP(MOEAP):
             if not too_close:
                 selected.append(idx)
                 accepted_vecs.append(obj_R[idx])
-
-        # If epsilon was too strict, fill remaining spots greedily
         if len(selected) < needed:
             for prox, idx in proxs:
                 if idx not in selected:

@@ -1,13 +1,8 @@
-# reconstruction/pet_forward.py
 import numpy as np
 from scipy.sparse import csr_matrix
 
 def make_system_matrix(img_size=64, n_angles=60, n_detectors=None):
-    """
-    Build a simple 2D parallel-beam system matrix A (M×N).
-    Uses ray-driven line integrals via Bresenham-like approach.
-    Kept simple for course project; replace with ASTRA toolbox for realism.
-    """
+
     if n_detectors is None:
         n_detectors = img_size
     N = img_size * img_size
@@ -20,14 +15,10 @@ def make_system_matrix(img_size=64, n_angles=60, n_detectors=None):
     for angle in angles:
         cos_a, sin_a = np.cos(angle), np.sin(angle)
         for d in range(n_detectors):
-            # Detector offset from centre
             offset = d - n_detectors/2 + 0.5
-            # Ray parameterised as (cx + t*cos_a + offset*(-sin_a),
-            #                       cy + t*sin_a + offset*cos_a)
             t_vals = np.linspace(-img_size/2, img_size/2, img_size*2)
             xs = cx + t_vals*cos_a - offset*sin_a
             ys = cy + t_vals*sin_a + offset*cos_a
-            # Accumulate pixels hit by this ray
             xi = np.floor(xs).astype(int)
             yi = np.floor(ys).astype(int)
             valid = (xi >= 0) & (xi < img_size) & \
@@ -40,7 +31,7 @@ def make_system_matrix(img_size=64, n_angles=60, n_detectors=None):
             M_total += 1
 
     A = csr_matrix((data, (rows, cols)), shape=(M_total, N))
-    # Row-normalise
+
     row_sums = np.array(A.sum(axis=1)).flatten()
     row_sums[row_sums == 0] = 1
     A = A.multiply(1.0 / row_sums[:, None])
@@ -48,7 +39,6 @@ def make_system_matrix(img_size=64, n_angles=60, n_detectors=None):
 
 
 def simulate_sinogram(true_image, A, n_events=8e4, scatter_frac=0.1):
-    """Analytically simulate PET sinogram with noise (Section III-F)."""
     y_mean = A @ true_image.flatten()
     y_mean = y_mean / (y_mean.sum() + 1e-10) * n_events
     scatter = scatter_frac * y_mean.mean() * np.ones_like(y_mean)

@@ -1,4 +1,4 @@
-# models/cnn_objectives.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,8 +6,6 @@ from torch.utils.data import Dataset, DataLoader
 import h5py
 import numpy as np
 from pathlib import Path
-
-# ── Architecture (paper: 4 × [Conv→AvgPool→BN→ReLU] → Dropout → FC) ──────────
 
 class ObjectiveCNN(nn.Module):
     def __init__(self, in_channels=1):
@@ -19,7 +17,6 @@ class ObjectiveCNN(nn.Module):
             self._block(32, 32),            # depth 32
         )
         self.dropout = nn.Dropout(0.2)
-        # After 4 AvgPool2×2 on 64×64 input → 4×4 feature map
         self.fc = nn.Linear(32 * 4 * 4, 1)
 
     def _block(self, in_c, out_c):
@@ -37,11 +34,8 @@ class ObjectiveCNN(nn.Module):
         return self.fc(x).squeeze(-1)
 
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
 class PETDataset(Dataset):
     def __init__(self, h5_path, split="train", objective_idx=0):
-        """objective_idx: 0=inv_RMSE, 1=NSNR, 2=inv_FWHM"""
         with h5py.File(h5_path, "r") as f:
             self.images = f[f"{split}/images"][:]   # (N,1,H,W)
             self.labels = f[f"{split}/labels"][:, objective_idx]  # (N,)
@@ -54,8 +48,6 @@ class PETDataset(Dataset):
         return (torch.tensor(self.images[idx], dtype=torch.float32),
                 torch.tensor(self.labels[idx],  dtype=torch.float32))
 
-
-# ── Training loop ─────────────────────────────────────────────────────────────
 
 OBJECTIVE_NAMES = ["inv_rmse", "nsnr", "inv_fwhm"]
 

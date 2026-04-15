@@ -1,4 +1,3 @@
-# experiments/run_experiment.py
 import numpy as np
 import torch
 from pathlib import Path
@@ -15,11 +14,9 @@ if __name__ == '__main__':
 
     Path("results").mkdir(exist_ok=True)
 
-    # ── Step 0: Generate dataset ──────────────────────────────────────────────
-    print("=== Generating dataset ===")
+    print("Generating dataset")
     generate_dataset(n=10_000)
 
-    # ── Step 1: Load or train CNN models ─────────────────────────────────────
     CHECKPOINT_DIR = "models/checkpoints"
     expected_files = [
         Path(CHECKPOINT_DIR) / "inv_rmse_best.pt",
@@ -44,8 +41,7 @@ if __name__ == '__main__':
     cnn_models = load_models(save_dir=CHECKPOINT_DIR, device=device)
     print(f"  Models loaded on: {device}")
 
-    # ── Step 2: Build PET forward model and simulate data ────────────────────
-    print("\n=== Simulating PET data ===")
+    print("\nSimulating PET data")
     IMG_SIZE = 64
     A = make_system_matrix(img_size=IMG_SIZE, n_angles=60)
 
@@ -55,8 +51,7 @@ if __name__ == '__main__':
                                               hot=True)
     sinogram, scatter = simulate_sinogram(true_img, A, n_events=8e4)
 
-    # ── Step 3: MOEAP with two objectives ────────────────────────────────────
-    print("\n=== Running MOEAP (Poisson LL + NSNR) ===")
+    print("\nRunning MOEAP (Poisson LL + NSNR)")
     moeap = MOEAP(sinogram, A, cnn_models, device,
                   objectives=["poisson_ll", "nsnr"],
                   pop_size=50, max_gen=100, img_size=IMG_SIZE)
@@ -64,8 +59,7 @@ if __name__ == '__main__':
     np.save("results/moeap_obj.npy", obj_vals)
     np.save("results/moeap_pop.npy", np.array(pop))
 
-    # ── Step 4: R-MOEAP with a reference point ───────────────────────────────
-    print("\n=== Running R-MOEAP ===")
+    print("\nRunning R-MOEAP")
     ref_pt = obj_vals[fronts[0]].mean(axis=0)
     rmoeap = RMOEAP(sinogram, A, cnn_models, device,
                     objectives=["poisson_ll", "nsnr"],
@@ -75,12 +69,10 @@ if __name__ == '__main__':
     r_pop, r_obj, r_fronts = rmoeap.run(verbose=True)
     np.save("results/rmoeap_obj.npy", r_obj)
 
-    # ── Step 5: KKTPM convergence tracking ───────────────────────────────────
-    print("\n=== Computing KKTPM ===")
+    print("\nComputing KKTPM")
     def eval_fn(img):
         return moeap._evaluate(img)
 
-    # Sample small subset of front to keep runtime manageable
     
     front_idx = fronts[0]
     front_pop = [pop[i] for i in front_idx]
@@ -88,21 +80,20 @@ if __name__ == '__main__':
     kktpm_vals = compute_kktpm(front_obj, front_pop, eval_fn)
     kktpm_summary(kktpm_vals)
 
-    # ── Step 6: Baselines ─────────────────────────────────────────────────────
-    print("\n=== Running baselines ===")
+    print("\nRunning baselines")
     em_results  = em_with_smoothing(sinogram, A)
     map_results = map_reconstruction(sinogram, A)
 
-    # ── Step 7: Plots ─────────────────────────────────────────────────────────
-    print("\n=== Generating plots ===")
+
+    print("\nGenerating plots")
     plot_pareto_front(obj_vals, fronts,
                   em_results, map_results,
                   cnn_models, device, A, sinogram,
+                  r_obj=r_obj, r_fronts=r_fronts,        # add R-MOEAP
                   objectives=["Poisson LL", "NSNR"],
-                  moeap_obj=moeap,                      # <-- add this
+                  kktpm_history=moeap.kktpm_history,     # add convergence
                   save_path="results/pareto_front.png")
 
     plot_images(pop, fronts, em_results, map_results,
-                true_img, save_path="results/reconstruction_images.png")
-
-    print("\n=== Done! Results saved to results/ ===")
+                true_img, sinogram=sinogram, A=A,
+                save_path="results/reconstruction_images.png")
