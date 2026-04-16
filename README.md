@@ -158,11 +158,11 @@ Produces two multi-panel figures saved to `results/`.
 ## Setup
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/pet_moeap
-cd pet_moeap
+#Clone the repository
+git clone https://github.com/Maimoonaaa/MOEAP
+cd MOEAP
 
-# 2. Install dependencies (Python 3.10+ recommended)
+#Install dependencies (Python 3.10+ recommended)
 pip install -r requirements.txt
 ```
 
@@ -197,7 +197,7 @@ On re-runs, the script automatically detects the saved `.pt` files in `models/ch
 ```bash
 python -m experiments.run_experiment
 # Console output will show:
-# === Pretrained checkpoints found — loading models ===
+#Pretrained checkpoints found — loading models
 #   Found: models/checkpoints/inv_rmse_best.pt
 #   Found: models/checkpoints/nsnr_best.pt
 #   Found: models/checkpoints/inv_fwhm_best.pt
