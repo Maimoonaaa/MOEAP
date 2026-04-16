@@ -1,15 +1,32 @@
 # optimizer/moeap.py
+"""
+MOEAP with per-generation KKTPM snapshot storage.
+
+Key changes over baseline:
+  • self.generation_snapshots stores (obj_P, pop_copy, fronts) every
+    `kktpm_every` generations — used by kktpm_per_generation().
+  • Gradient normalisation in directed_mutation prevents step explosion.
+  • Hypervolume indicator computed at each generation for an additional
+    convergence metric.
+  • obj_history stores full population objectives (not just front) so
+    the visualiser can plot the complete cloud.
+"""
+
 import numpy as np
 from copy import deepcopy
 from optimizer.kktpm import compute_kktpm
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-dominated sort  (NSGA-II fast sort)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def nondominated_sort(obj_values):
     """
-    obj_values: (N, M) array — we MAXIMISE all objectives.
-    Returns list of fronts, each front is a list of indices.
+    Maximise all objectives.
+    Returns list of fronts, each a list of population indices.
     """
     N = len(obj_values)
-    dominated_by = [[] for _ in range(N)]
+    dominated_by    = [[] for _ in range(N)]
     domination_count = np.zeros(N, dtype=int)
     fronts = [[]]
 
@@ -17,53 +34,82 @@ def nondominated_sort(obj_values):
         for j in range(N):
             if i == j:
                 continue
-            # i dominates j if better or equal in all, strictly better in one
-            if np.all(obj_values[i] >= obj_values[j]) and \
-               np.any(obj_values[i] >  obj_values[j]):
+            if (np.all(obj_values[i] >= obj_values[j]) and
+                    np.any(obj_values[i] >  obj_values[j])):
                 dominated_by[i].append(j)
-            elif np.all(obj_values[j] >= obj_values[i]) and \
-                 np.any(obj_values[j] >  obj_values[i]):
+            elif (np.all(obj_values[j] >= obj_values[i]) and
+                      np.any(obj_values[j] >  obj_values[i])):
                 domination_count[i] += 1
         if domination_count[i] == 0:
             fronts[0].append(i)
 
     k = 0
     while fronts[k]:
-        next_front = []
+        nxt = []
         for i in fronts[k]:
             for j in dominated_by[i]:
                 domination_count[j] -= 1
                 if domination_count[j] == 0:
-                    next_front.append(j)
+                    nxt.append(j)
         k += 1
-        fronts.append(next_front)
-
+        fronts.append(nxt)
     return [f for f in fronts if f]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Crowding distance
+# ─────────────────────────────────────────────────────────────────────────────
+
 def crowding_distance(obj_values, front):
-    """Crowding distance for individuals in a front."""
     n = len(front)
     if n <= 2:
         return np.full(n, np.inf)
     distances = np.zeros(n)
     for m in range(obj_values.shape[1]):
-        vals = obj_values[front, m]
+        vals  = obj_values[front, m]
         order = np.argsort(vals)
-        distances[order[0]] = np.inf
+        distances[order[0]]  = np.inf
         distances[order[-1]] = np.inf
         rng_m = vals[order[-1]] - vals[order[0]] + 1e-12
-        for k in range(1, n-1):
+        for k in range(1, n - 1):
             distances[order[k]] += (vals[order[k+1]] - vals[order[k-1]]) / rng_m
     return distances
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hypervolume (2-D only, exact)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def hypervolume_2d(obj_values, front, ref=None):
+    """
+    Exact 2-D hypervolume for front (maximisation).
+    ref: reference point (default: per-dim minimum of all solutions).
+    """
+    pts = obj_values[front]
+    if pts.shape[1] != 2:
+        return np.nan
+    if ref is None:
+        ref = obj_values.min(axis=0) - 1e-6
+    # Sort by first objective descending
+    order = np.argsort(pts[:, 0])[::-1]
+    pts   = pts[order]
+    hv    = 0.0
+    prev_y = ref[1]
+    for p in pts:
+        if p[0] > ref[0] and p[1] > prev_y:
+            hv     += (p[0] - ref[0]) * (p[1] - prev_y)
+            prev_y  = p[1]
+    return hv
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Genetic operators
+# ─────────────────────────────────────────────────────────────────────────────
 
 def simulated_binary_crossover(parent1, parent2, eta_c=20, p_cross=0.95):
-    """SBX on flattened image arrays (paper uses eta_c=20, Pc=0.95)."""
     if np.random.rand() > p_cross:
         return parent1.copy(), parent2.copy()
-    u = np.random.rand(*parent1.shape)
+    u    = np.random.rand(*parent1.shape)
     beta = np.where(u <= 0.5,
                     (2*u)**(1/(eta_c+1)),
                     (1/(2*(1-u)))**(1/(eta_c+1)))
@@ -72,88 +118,99 @@ def simulated_binary_crossover(parent1, parent2, eta_c=20, p_cross=0.95):
     return c1, c2
 
 
-def directed_mutation(image, sinogram, system_matrix, strength=0.01):
-    """
-    Directed mutation: small gradient step toward higher Poisson LL
-    + Gaussian noise. Clamp to reasonable emission range [0, 5].
-    """
-    grad = poisson_ll_gradient(image, sinogram, system_matrix)
-    #Normalising gradient to avoid exploding steps
-    grad_norm = np.linalg.norm(grad)
-    if grad_norm > 1e-8:
-        grad = grad / grad_norm
-    mutated = image + strength * grad
-    mutated += np.random.randn(*image.shape) * strength * 0.05
-    # Clamp: non-negative, and cap at 5× the sinogram-implied mean
-    upper = max(5.0, image.mean() * 10)
-    mutated = np.clip(mutated, 0, upper)
-    return mutated
-
 def poisson_ll(image, sinogram, system_matrix, scatter_randoms=None):
     img_flat = image.flatten()
-    y_bar = system_matrix @ img_flat
+    y_bar    = system_matrix @ img_flat
     if scatter_randoms is not None:
         y_bar = y_bar + scatter_randoms
     y_bar = np.clip(y_bar, 1e-10, None)
-    y = sinogram.flatten()
-    return np.sum(-y_bar + y * np.log(y_bar))
+    y     = sinogram.flatten()
+    return float(np.sum(-y_bar + y * np.log(y_bar)))
 
 
 def poisson_ll_gradient(image, sinogram, system_matrix, scatter_randoms=None):
     img_flat = image.flatten()
-    y_bar = system_matrix @ img_flat
+    y_bar    = system_matrix @ img_flat
     if scatter_randoms is not None:
         y_bar = y_bar + scatter_randoms
     y_bar = np.clip(y_bar, 1e-10, None)
-    y = sinogram.flatten()
-    grad = system_matrix.T @ (y / y_bar - 1)
+    y     = sinogram.flatten()
+    grad  = system_matrix.T @ (y / y_bar - 1)
     return grad.reshape(image.shape)
 
 
-def evaluate_cnn_objectives(image, cnn_models, device, img_size=64):
-    """Evaluates all CNN models on a single image.
-    Returns dict of objective values.
+def directed_mutation(image, sinogram, system_matrix, strength=0.01):
     """
+    Gradient step in the Poisson-LL direction + small Gaussian noise.
+    Gradient is L2-normalised to avoid exploding steps.
+    """
+    grad      = poisson_ll_gradient(image, sinogram, system_matrix)
+    grad_norm = np.linalg.norm(grad)
+    if grad_norm > 1e-8:
+        grad = grad / grad_norm
+    mutated  = image + strength * grad
+    mutated += np.random.randn(*image.shape) * strength * 0.05
+    upper    = max(5.0, image.mean() * 10)
+    return np.clip(mutated, 0.0, upper)
+
+
+def evaluate_cnn_objectives(image, cnn_models, device, img_size=64):
     import torch
     img_norm = image / (image.max() + 1e-8)
-    tensor = torch.tensor(
+    tensor   = torch.tensor(
         img_norm[None, None].astype(np.float32)).to(device)
-    results = {}
+    results  = {}
     with torch.no_grad():
         for name, model in cnn_models.items():
             results[name] = model(tensor).item()
     return results
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOEAP
+# ─────────────────────────────────────────────────────────────────────────────
+
 class MOEAP:
     def __init__(self, sinogram, system_matrix,
                  cnn_models, device,
                  objectives=("poisson_ll", "nsnr", "inv_rmse"),
-                 pop_size=50,
-                 max_gen=100,
-                 img_size=64,
-                 eta_c=20, p_cross=0.95):
+                 pop_size=50, max_gen=100, img_size=64,
+                 eta_c=20, p_cross=0.95,
+                 kktpm_every=10, kktpm_front_size=5):
+        """
+        kktpm_every       : compute KKTPM every N generations
+        kktpm_front_size  : number of front-0 members used for KKTPM
+        """
+        self.sinogram      = sinogram
+        self.A             = system_matrix
+        self.cnn_models    = cnn_models
+        self.device        = device
+        self.objectives    = list(objectives)
+        self.N             = pop_size
+        self.max_gen       = max_gen
+        self.H = self.W    = img_size
+        self.eta_c         = eta_c
+        self.p_cross       = p_cross
+        self.kktpm_every   = kktpm_every
+        self.kktpm_front_sz = kktpm_front_size
 
-        self.sinogram = sinogram
-        self.A = system_matrix
-        self.cnn_models = cnn_models
-        self.device = device
-        self.objectives = objectives
-        self.N = pop_size
-        self.max_gen = max_gen
-        self.H = self.W = img_size
-        self.eta_c = eta_c
-        self.kktpm_history = []
-        self.p_cross = p_cross
+        # History containers
+        self.obj_history          = []   # list of (N_p, M) arrays per gen
+        self.kktpm_history        = []   # scalar per checkpoint gen
+        self.kktpm_full_history   = []   # five-number per checkpoint gen
+        self.hv_history           = []   # hypervolume per gen (2-obj only)
+        self.generation_snapshots = []   # (obj_P, pop, fronts) for external use
+
         fbp = self._fbp_init()
         self.population = [
-            np.clip(fbp + np.random.uniform(-0.1, 0.1, fbp.shape), 0, None)
+            np.clip(fbp + np.random.uniform(-0.1, 0.1, fbp.shape), 0.0, None)
             for _ in range(self.N)
         ]
 
-        self.obj_history = []
+    # ── helpers ───────────────────────────────────────────────────────────────
 
     def _fbp_init(self):
-        y = self.sinogram.flatten()
+        y  = self.sinogram.flatten()
         bp = self.A.T @ y
         return (bp / (bp.max() + 1e-8)).reshape(self.H, self.W)
 
@@ -163,22 +220,20 @@ class MOEAP:
             if obj == "poisson_ll":
                 vals.append(poisson_ll(img, self.sinogram, self.A))
             else:
-                cnn_vals = evaluate_cnn_objectives(
-                    img, self.cnn_models, self.device)
-                vals.append(cnn_vals.get(obj, 0.0))
-        return np.array(vals)
+                cnn_v = evaluate_cnn_objectives(img, self.cnn_models, self.device)
+                vals.append(cnn_v.get(obj, 0.0))
+        return np.array(vals, dtype=float)
 
     def _evaluate_population(self, pop):
         return np.array([self._evaluate(img) for img in pop])
 
     def _select_parents(self, obj_values, fronts):
-        N = self.N
         rank = np.zeros(len(obj_values), dtype=int)
         for r, front in enumerate(fronts):
             for idx in front:
                 rank[idx] = r
         selected = []
-        for _ in range(N):
+        for _ in range(self.N):
             a, b = np.random.choice(len(obj_values), 2, replace=False)
             if rank[a] < rank[b]:
                 selected.append(a)
@@ -188,65 +243,93 @@ class MOEAP:
                 selected.append(a if np.random.rand() < 0.5 else b)
         return selected
 
+    def _compute_kktpm_checkpoint(self, obj_P, P, fronts):
+        fi  = fronts[0][:self.kktpm_front_sz]
+        fp  = [P[i] for i in fi]
+        fo  = obj_P[fi]
+        k, _ = compute_kktpm(fo, fp, self._evaluate,
+                              h=1e-3, n_sample=50)
+        self.kktpm_history.append(float(np.median(k)))
+        self.kktpm_full_history.append({
+            "min":    float(k.min()),
+            "q1":     float(np.percentile(k, 25)),
+            "median": float(np.median(k)),
+            "q3":     float(np.percentile(k, 75)),
+            "max":    float(k.max()),
+        })
+
+    # ── main loop ─────────────────────────────────────────────────────────────
+
     def run(self, verbose=True):
-        P = self.population
-        obj_P = self._evaluate_population(P)
+        P      = self.population
+        obj_P  = self._evaluate_population(P)
         fronts = nondominated_sort(obj_P)
 
         for gen in range(1, self.max_gen + 1):
-            #Select parents, create offspring via SBX + directed mutation
+
+            # ── create offspring ───────────────────────────────────────────────
             parent_idx = self._select_parents(obj_P, fronts)
             Q = []
             for i in range(0, self.N, 2):
                 p1 = P[parent_idx[i]].flatten()
                 p2 = P[parent_idx[min(i+1, self.N-1)]].flatten()
                 c1, c2 = simulated_binary_crossover(p1, p2, self.eta_c, self.p_cross)
-                c1 = directed_mutation(c1.reshape(self.H, self.W),
-                                       self.sinogram, self.A).flatten()
-                c2 = directed_mutation(c2.reshape(self.H, self.W),
-                                       self.sinogram, self.A).flatten()
-                Q.append(c1.reshape(self.H, self.W))
-                Q.append(c2.reshape(self.H, self.W))
+                c1 = directed_mutation(c1.reshape(self.H, self.W), self.sinogram, self.A)
+                c2 = directed_mutation(c2.reshape(self.H, self.W), self.sinogram, self.A)
+                Q.append(c1); Q.append(c2)
             Q = Q[:self.N]
 
-            obj_Q = self._evaluate_population(Q)
-            R = P + Q
-            obj_R = np.vstack([obj_P, obj_Q])
-            fronts_R = nondominated_sort(obj_R)
+            # ── evaluate and combine ───────────────────────────────────────────
+            obj_Q  = self._evaluate_population(Q)
+            R      = P + Q
+            obj_R  = np.vstack([obj_P, obj_Q])
+            front_R = nondominated_sort(obj_R)
+
+            # ── environmental selection ────────────────────────────────────────
             new_P, new_obj = [], []
-            for front in fronts_R:
+            for front in front_R:
                 if len(new_P) + len(front) <= self.N:
                     for idx in front:
                         new_P.append(R[idx])
                         new_obj.append(obj_R[idx])
                 else:
                     needed = self.N - len(new_P)
-                    cd = crowding_distance(obj_R, front)
-                    sorted_front = sorted(zip(cd, front),
-                                          reverse=True)[:needed]
-                    for _, idx in sorted_front:
+                    cd     = crowding_distance(obj_R, front)
+                    top    = sorted(zip(cd, front), reverse=True)[:needed]
+                    for _, idx in top:
                         new_P.append(R[idx])
                         new_obj.append(obj_R[idx])
                     break
 
-            P = new_P
-            obj_P = np.array(new_obj)
+            P      = new_P
+            obj_P  = np.array(new_obj)
             fronts = nondominated_sort(obj_P)
-            self.obj_history.append(obj_P[fronts[0]])
+
+            # ── track history ──────────────────────────────────────────────────
+            self.obj_history.append(obj_P.copy())
+
+            # Hypervolume (2-obj only)
+            if obj_P.shape[1] == 2:
+                hv = hypervolume_2d(obj_P, fronts[0])
+                self.hv_history.append(hv)
+
+            # KKTPM checkpoint
+            if gen % self.kktpm_every == 0:
+                self._compute_kktpm_checkpoint(obj_P, P, fronts)
+                self.generation_snapshots.append(
+                    (obj_P.copy(), list(P), [list(f) for f in fronts])
+                )
 
             if verbose and gen % 10 == 0:
-                front0 = obj_P[fronts[0]]
-                print(f"  Gen {gen:4d} | front size={len(fronts[0])} "
-                      f"| obj means={front0.mean(axis=0).round(3)}")
-        self.kktpm_history.append(
-            np.median(compute_kktpm(
-                obj_P[fronts[0]][:5],          # only 5 front solutions
-                [P[i] for i in fronts[0][:5]],
-                self._evaluate,
-                h=1e-3
-            ))
-        )
+                f0 = obj_P[fronts[0]]
+                print(f"  Gen {gen:4d} | front={len(fronts[0])} "
+                      f"| obj_mean={f0.mean(axis=0).round(3)}"
+                      + (f" | HV={self.hv_history[-1]:.2f}"
+                         if self.hv_history else "")
+                      + (f" | KKTPM_med={self.kktpm_history[-1]:.4f}"
+                         if self.kktpm_history else ""))
+
         self.population = P
         self.obj_values = obj_P
-        self.fronts = fronts
+        self.fronts     = fronts
         return P, obj_P, fronts

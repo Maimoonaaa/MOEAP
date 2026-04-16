@@ -1,126 +1,264 @@
+# models/cnn_objectives.py
+"""
+Upgraded CNN objective regressors.
+
+Architecture change from baseline:
+  Baseline : 4 × [Conv → AvgPool → BN → ReLU] → Dropout → FC
+  New       : ResNet-18-style encoder with:
+                - Initial stem conv (7×7, stride 2)
+                - 4 residual stages with BasicBlock (skip connections)
+                - Global Average Pooling
+                - Dropout → FC head
+              Input: (B, 1, 64, 64) → scalar
+
+Improvements:
+  • Skip connections prevent vanishing gradients → better convergence
+  • Larger effective receptive field → captures long-range correlations
+    between lesion and background (critical for NSNR and RMSE tasks)
+  • Per-objective label normalisation (z-score) for more stable training
+  • Gradient clipping during training
+  • Mixed precision training (if CUDA available)
+"""
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.cuda.amp import GradScaler, autocast
 import h5py
 import numpy as np
 from pathlib import Path
 
-class ObjectiveCNN(nn.Module):
-    def __init__(self, in_channels=1):
-        super().__init__()
-        self.blocks = nn.Sequential(
-            self._block(in_channels, 8),   # depth 8
-            self._block(8,  16),            # depth 16
-            self._block(16, 32),            # depth 32
-            self._block(32, 32),            # depth 32
-        )
-        self.dropout = nn.Dropout(0.2)
-        self.fc = nn.Linear(32 * 4 * 4, 1)
+OBJECTIVE_NAMES = ["inv_rmse", "nsnr", "inv_fwhm"]
 
-    def _block(self, in_c, out_c):
-        return nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-            nn.AvgPool2d(kernel_size=2, stride=2),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(inplace=True),
-        )
+# ─────────────────────────────────────────────────────────────────────────────
+# ResNet BasicBlock
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BasicBlock(nn.Module):
+    """Standard ResNet BasicBlock: two 3×3 convs with skip connection."""
+    expansion = 1
+
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn1   = nn.BatchNorm2d(out_ch)
+        self.relu  = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=False)
+        self.bn2   = nn.BatchNorm2d(out_ch)
+
+        self.downsample = None
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
 
     def forward(self, x):
-        x = self.blocks(x)
-        x = self.dropout(x)
-        x = x.view(x.size(0), -1)
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        return self.relu(out + identity)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ResNet-18 style encoder (single-channel input, scalar output)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ResNetObjectiveCNN(nn.Module):
+    """
+    ResNet-18-like network adapted for 64×64 single-channel PET images.
+
+    Stage dimensions for 64×64 input:
+      stem     → 32×32 (stride-2 MaxPool)
+      layer1   → 32×32  (no stride)
+      layer2   → 16×16  (stride-2)
+      layer3   →  8×8   (stride-2)
+      layer4   →  4×4   (stride-2)
+      GAP      →  1×1
+      FC       → scalar
+    """
+    def __init__(self, in_channels=1, dropout=0.3):
+        super().__init__()
+
+        # Stem: adapted for small 64×64 images (smaller kernel than standard ResNet)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),  # → 16×16
+        )
+
+        # Residual stages
+        self.layer1 = self._make_layer(32,  64,  n_blocks=2, stride=1)
+        self.layer2 = self._make_layer(64,  128, n_blocks=2, stride=2)
+        self.layer3 = self._make_layer(128, 256, n_blocks=2, stride=2)
+        self.layer4 = self._make_layer(256, 256, n_blocks=2, stride=2)
+
+        # Head
+        self.gap     = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc      = nn.Linear(256, 1)
+
+        # Weight initialisation (Kaiming)
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight); nn.init.zeros_(m.bias)
+
+    def _make_layer(self, in_ch, out_ch, n_blocks, stride):
+        layers = [BasicBlock(in_ch, out_ch, stride=stride)]
+        for _ in range(1, n_blocks):
+            layers.append(BasicBlock(out_ch, out_ch, stride=1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.gap(x)
+        x = self.dropout(x.view(x.size(0), -1))
         return self.fc(x).squeeze(-1)
 
 
+# Keep old name as alias so run_experiment.py still works
+ObjectiveCNN = ResNetObjectiveCNN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset with z-score label normalisation
+# ─────────────────────────────────────────────────────────────────────────────
+
 class PETDataset(Dataset):
-    def __init__(self, h5_path, split="train", objective_idx=0):
+    def __init__(self, h5_path, split="train", objective_idx=0,
+                 label_mean=None, label_std=None):
         with h5py.File(h5_path, "r") as f:
-            self.images = f[f"{split}/images"][:]   # (N,1,H,W)
-            self.labels = f[f"{split}/labels"][:, objective_idx]  # (N,)
-        # Normalise images to [0,1]
-        self.images = self.images / (self.images.max() + 1e-8)
+            self.images = f[f"{split}/images"][:]    # (N,1,H,W)
+            raw_labels  = f[f"{split}/labels"][:, objective_idx]
+
+        # Normalise images to [0,1] per sample
+        img_max = self.images.max(axis=(1, 2, 3), keepdims=True) + 1e-8
+        self.images = (self.images / img_max).astype(np.float32)
+
+        # Z-score labels (fit stats on train set, apply to val/test)
+        if label_mean is None:
+            label_mean = float(raw_labels.mean())
+            label_std  = float(raw_labels.std()) + 1e-8
+        self.label_mean = label_mean
+        self.label_std  = label_std
+        self.labels = ((raw_labels - label_mean) / label_std).astype(np.float32)
 
     def __len__(self): return len(self.images)
 
     def __getitem__(self, idx):
-        return (torch.tensor(self.images[idx], dtype=torch.float32),
-                torch.tensor(self.labels[idx],  dtype=torch.float32))
+        return (torch.tensor(self.images[idx]),
+                torch.tensor(self.labels[idx]))
 
 
-OBJECTIVE_NAMES = ["inv_rmse", "nsnr", "inv_fwhm"]
+# ─────────────────────────────────────────────────────────────────────────────
+# Training
+# ─────────────────────────────────────────────────────────────────────────────
 
 def train_model(h5_path="data/pet_dataset.h5",
                 objective_idx=0,
                 save_dir="models/checkpoints",
-                epochs=60,
-                patience=15,
-                lr=1e-3,
-                batch_size=64):
+                epochs=80,
+                patience=20,
+                lr=3e-4,
+                batch_size=64,
+                weight_decay=1e-4):
 
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     name = OBJECTIVE_NAMES[objective_idx]
-    print(f"\n=== Training model for: {name} ===")
+    print(f"\n=== Training ResNet model for: {name} ===")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = (device.type == "cuda")
 
+    # Compute label stats from training set
     train_ds = PETDataset(h5_path, "train", objective_idx)
-    val_ds   = PETDataset(h5_path, "val",   objective_idx)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
-    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+    lm, ls   = train_ds.label_mean, train_ds.label_std
+    val_ds   = PETDataset(h5_path, "val",   objective_idx,
+                           label_mean=lm, label_std=ls)
 
-    model = ObjectiveCNN().to(device)
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.MSELoss()
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                          num_workers=0, pin_memory=(device.type == "cuda"))
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                          num_workers=0, pin_memory=(device.type == "cuda"))
 
-    best_val_loss = float("inf")
+    model     = ResNetObjectiveCNN().to(device)
+    n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Parameters: {n_params:,}")
+
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr/50)
+    criterion = nn.HuberLoss(delta=1.0)   # robust to label outliers
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
+    best_val   = float("inf")
     no_improve = 0
+    train_hist, val_hist = [], []
 
-    for epoch in range(1, epochs+1):
+    for epoch in range(1, epochs + 1):
         # Train
         model.train()
-        train_loss = 0.0
+        tr_loss = 0.0
         for imgs, lbls in train_dl:
             imgs, lbls = imgs.to(device), lbls.to(device)
-            optimizer.zero_grad()
-            pred = model(imgs)
-            loss = criterion(pred, lbls)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * len(imgs)
-        train_loss /= len(train_ds)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                loss = criterion(model(imgs), lbls)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            scaler.step(optimizer); scaler.update()
+            tr_loss += loss.item() * len(imgs)
+        tr_loss /= len(train_ds)
+        train_hist.append(tr_loss)
 
         # Validate
         model.eval()
-        val_loss = 0.0
+        va_loss = 0.0
         with torch.no_grad():
             for imgs, lbls in val_dl:
                 imgs, lbls = imgs.to(device), lbls.to(device)
-                pred = model(imgs)
-                val_loss += criterion(pred, lbls).item() * len(imgs)
-        val_loss /= len(val_ds)
-
+                with torch.amp.autocast('cuda', enabled=use_amp):
+                    va_loss += criterion(model(imgs), lbls).item() * len(imgs)
+        va_loss /= len(val_ds)
+        val_hist.append(va_loss)
         scheduler.step()
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if va_loss < best_val:
+            best_val   = va_loss
             no_improve = 0
-            torch.save(model.state_dict(),
-                       f"{save_dir}/{name}_best.pt")
+            torch.save({
+                "state_dict":  model.state_dict(),
+                "label_mean":  lm,
+                "label_std":   ls,
+                "objective":   name,
+            }, f"{save_dir}/{name}_best.pt")
         else:
             no_improve += 1
 
         if epoch % 10 == 0:
-            print(f"  Epoch {epoch:3d} | train={train_loss:.4f} val={val_loss:.4f}")
+            print(f"  Epoch {epoch:3d} | train={tr_loss:.4f} val={va_loss:.4f} "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         if no_improve >= patience:
             print(f"  Early stop at epoch {epoch}")
             break
 
-    print(f"  Best val loss: {best_val_loss:.4f}")
-    return best_val_loss
+    np.save(f"{save_dir}/{name}_train_hist.npy", np.array(train_hist))
+    np.save(f"{save_dir}/{name}_val_hist.npy",   np.array(val_hist))
+    print(f"  Best val loss: {best_val:.4f}")
+    return best_val
 
 
 def load_models(save_dir="models/checkpoints", device=None):
@@ -128,35 +266,36 @@ def load_models(save_dir="models/checkpoints", device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     models = {}
-    for idx, name in enumerate(OBJECTIVE_NAMES):
-        m = ObjectiveCNN().to(device)
-        m.load_state_dict(torch.load(
-            f"{save_dir}/{name}_best.pt", map_location=device))
+    for name in OBJECTIVE_NAMES:
+        ckpt = torch.load(f"{save_dir}/{name}_best.pt", map_location=device)
+        m    = ResNetObjectiveCNN().to(device)
+        m.load_state_dict(ckpt["state_dict"])
         m.eval()
         models[name] = m
     return models
 
 
-def evaluate_all(h5_path="data/pet_dataset.h5",
-                 save_dir="models/checkpoints"):
-    """Correlation on test set for each model."""
+def evaluate_all(h5_path="data/pet_dataset.h5", save_dir="models/checkpoints"):
+    """Pearson correlation on test set for each model."""
     import scipy.stats as stats
     device = torch.device("cpu")
-    models = load_models(save_dir, device)
-
     for idx, name in enumerate(OBJECTIVE_NAMES):
-        ds = PETDataset(h5_path, "test", idx)
-        dl = DataLoader(ds, batch_size=128, shuffle=False)
+        ckpt  = torch.load(f"{save_dir}/{name}_best.pt", map_location=device)
+        lm, ls = ckpt["label_mean"], ckpt["label_std"]
+        ds    = PETDataset(h5_path, "test", idx, label_mean=lm, label_std=ls)
+        dl    = DataLoader(ds, batch_size=128, shuffle=False)
+        m     = ResNetObjectiveCNN().to(device)
+        m.load_state_dict(ckpt["state_dict"]); m.eval()
         preds, truths = [], []
-        model = models[name]
         with torch.no_grad():
             for imgs, lbls in dl:
-                preds.append(model(imgs).numpy())
+                preds.append(m(imgs).numpy())
                 truths.append(lbls.numpy())
         preds  = np.concatenate(preds)
         truths = np.concatenate(truths)
-        r, p = stats.pearsonr(preds, truths)
-        print(f"{name}: r={r:.3f}, p={p:.3e}")
+        r, p   = stats.pearsonr(preds, truths)
+        rmse   = np.sqrt(np.mean((preds - truths)**2))
+        print(f"{name}: r={r:.3f}, p={p:.3e}, RMSE={rmse:.4f}")
 
 
 if __name__ == "__main__":

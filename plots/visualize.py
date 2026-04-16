@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy.ndimage import gaussian_filter
+from models.cnn_objectives import OBJECTIVE_NAMES
 
 
 def plot_pareto_front(obj_vals, fronts, em_results, map_results,
@@ -9,6 +10,9 @@ def plot_pareto_front(obj_vals, fronts, em_results, map_results,
                       r_obj=None, r_fronts=None,
                       objectives=("Poisson LL", "NSNR"),
                       kktpm_history=None,
+                      kktpm_full_history=None,
+                      hv_history=None,
+                      obj_history=None,
                       save_path="results/pareto_front.png"):
 
     from optimizer.moeap import poisson_ll, evaluate_cnn_objectives
@@ -105,6 +109,39 @@ def plot_pareto_front(obj_vals, fronts, em_results, map_results,
     plt.close()
     print(f"Saved: {save_path}")
 
+def plot_training_curves(save_dir="models/checkpoints", save_path="results/training_curves.png"):
+    """Plot train/val loss curves for all objective models."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    fig, axes = plt.subplots(1, len(OBJECTIVE_NAMES), figsize=(15, 4))
+    if len(OBJECTIVE_NAMES) == 1:
+        axes = [axes]
+
+    for ax, name in zip(axes, OBJECTIVE_NAMES):
+        train_path = Path(save_dir) / f"{name}_train_hist.npy"
+        val_path   = Path(save_dir) / f"{name}_val_hist.npy"
+
+        if train_path.exists() and val_path.exists():
+            train_hist = np.load(train_path)
+            val_hist   = np.load(val_path)
+            ax.plot(train_hist, label="Train", linewidth=1.5)
+            ax.plot(val_hist,   label="Val",   linewidth=1.5, linestyle="--")
+            ax.set_title(f"{name}")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Huber Loss")
+            ax.legend(fontsize=8)
+        else:
+            ax.text(0.5, 0.5, f"No history\nfor {name}",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(f"{name} (not trained yet)")
+
+    plt.suptitle("CNN Training Curves", fontsize=13)
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {save_path}")
 
 def plot_images(pop, fronts, em_results, map_results,
                 true_img, sinogram=None, A=None,
