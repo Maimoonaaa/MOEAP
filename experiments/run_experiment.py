@@ -19,9 +19,9 @@ if __name__ == '__main__':
 
     CHECKPOINT_DIR = "models/checkpoints"
     expected_files = [
-        Path(CHECKPOINT_DIR) / "inv_rmse_best.pt",
-        Path(CHECKPOINT_DIR) / "nsnr_best.pt",
-        Path(CHECKPOINT_DIR) / "inv_fwhm_best.pt",
+        Path(CHECKPOINT_DIR)/"inv_rmse_best.pt",
+        Path(CHECKPOINT_DIR)/"nsnr_best.pt",
+        Path(CHECKPOINT_DIR)/ "inv_fwhm_best.pt",
     ]
     all_present = all(f.exists() for f in expected_files)
 
@@ -89,9 +89,9 @@ if __name__ == '__main__':
     plot_pareto_front(obj_vals, fronts,
                   em_results, map_results,
                   cnn_models, device, A, sinogram,
-                  r_obj=r_obj, r_fronts=r_fronts,        # add R-MOEAP
+                  r_obj=r_obj, r_fronts=r_fronts,
                   objectives=["Poisson LL", "NSNR"],
-                  kktpm_history=moeap.kktpm_history,     # add convergence
+                  kktpm_history=moeap.kktpm_history,
                   save_path="results/pareto_front.png")
 
     plot_images(pop, fronts, em_results, map_results,

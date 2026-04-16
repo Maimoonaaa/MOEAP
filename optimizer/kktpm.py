@@ -4,7 +4,7 @@ import numpy as np
 def compute_kktpm(obj_values, population, evaluate_fn, h=1e-3):
     """
     KKTPM: measures closeness to Pareto-optimal front.
-    Values should decrease toward 0 as solutions converge.
+    values should decrease toward 0 as solutions converge.
     """
     N, M = obj_values.shape
     kktpm_vals = np.zeros(N)
@@ -25,15 +25,12 @@ def compute_kktpm(obj_values, population, evaluate_fn, h=1e-3):
             obj_plus  = evaluate_fn(flat_plus.reshape(img.shape))
             obj_minus = evaluate_fn(flat_minus.reshape(img.shape))
             grads[:, k] = (obj_plus - obj_minus) / (2 * h)
-
-        # Normalise each gradient row to unit scale
         for m in range(M):
             gn = np.linalg.norm(grads[m])
             if gn > 1e-10:
                 grads[m] /= gn
 
-        # Optimal lambda via projected gradient descent on simplex
-        G = grads @ grads.T   # (M, M)
+        G = grads @ grads.T
         lambda_vec = np.ones(M) / M
         lr = 0.05
         for _ in range(300):
@@ -41,13 +38,13 @@ def compute_kktpm(obj_values, population, evaluate_fn, h=1e-3):
             lambda_vec = lambda_vec - lr * grad_lambda
             lambda_vec = _project_simplex(lambda_vec)
 
-        # KKTPM = norm of weighted gradient sum (should → 0 at optimum)
+        # KKTPM=norm of weighted gradient sum (should → 0 at optimum)
         weighted_grad = np.zeros(len(sample_idx))
         for m in range(M):
             weighted_grad += lambda_vec[m] * grads[m]
         kktpm_vals[i] = float(np.linalg.norm(weighted_grad))
 
-    # Normalise to [0, 1]
+    #Normalise to [0, 1]
     max_val = kktpm_vals.max()
     if max_val > 1e-10:
         kktpm_vals /= max_val

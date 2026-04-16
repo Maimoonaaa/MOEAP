@@ -13,7 +13,7 @@ class RMOEAP(MOEAP):
         """Minimum Euclidean distance from obj_vec to any reference point."""
         if not self.ref_points:
             return 0.0
-        # Normalise each objective to [0,1] range (approximate)
+        #Normalise each objective to [0,1] range
         dists = [np.linalg.norm(obj_vec - rp) for rp in self.ref_points]
         return min(dists)
 
@@ -68,7 +68,7 @@ class RMOEAP(MOEAP):
             obj_R = np.vstack([obj_P, obj_Q])
             fronts_R = nondominated_sort(obj_R)
 
-            # Fill next generation — use ref-point proximity in last front
+            #Fill next generation—use ref-point proximity in last front
             new_P, new_obj = [], []
             for front in fronts_R:
                 if len(new_P) + len(front) <= self.N:

@@ -112,9 +112,9 @@ def plot_images(pop, fronts, em_results, map_results,
     
     fi = fronts[0]
     n_front = len(fi)
-    idx_low  = fi[0]                  # one end of front
-    idx_mid  = fi[n_front // 2]       # compromise
-    idx_high = fi[-1]                 # other end
+    idx_low  = fi[0] 
+    idx_mid  = fi[n_front // 2] 
+    idx_high = fi[-1]                
 
     moeap_low  = pop[idx_low]
     moeap_mid  = pop[idx_mid]

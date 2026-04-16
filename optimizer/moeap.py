@@ -78,7 +78,7 @@ def directed_mutation(image, sinogram, system_matrix, strength=0.01):
     + Gaussian noise. Clamp to reasonable emission range [0, 5].
     """
     grad = poisson_ll_gradient(image, sinogram, system_matrix)
-    # Normalise gradient to avoid exploding steps
+    #Normalising gradient to avoid exploding steps
     grad_norm = np.linalg.norm(grad)
     if grad_norm > 1e-8:
         grad = grad / grad_norm
@@ -111,9 +111,8 @@ def poisson_ll_gradient(image, sinogram, system_matrix, scatter_randoms=None):
 
 
 def evaluate_cnn_objectives(image, cnn_models, device, img_size=64):
-    """
-    Evaluate all CNN models on a single image.
-    Returns dict of objective values (to MAXIMISE).
+    """Evaluates all CNN models on a single image.
+    Returns dict of objective values.
     """
     import torch
     img_norm = image / (image.max() + 1e-8)
@@ -190,13 +189,12 @@ class MOEAP:
         return selected
 
     def run(self, verbose=True):
-        # Evaluate initial population
         P = self.population
         obj_P = self._evaluate_population(P)
         fronts = nondominated_sort(obj_P)
 
         for gen in range(1, self.max_gen + 1):
-            # Select parents, create offspring via SBX + directed mutation
+            #Select parents, create offspring via SBX + directed mutation
             parent_idx = self._select_parents(obj_P, fronts)
             Q = []
             for i in range(0, self.N, 2):
