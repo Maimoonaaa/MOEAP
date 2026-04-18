@@ -181,7 +181,8 @@ def plot_images(pop, fronts, em_results, map_results,
 
     for j, (img, title) in enumerate(zip(imgs_disp, titles)):
         ax = fig.add_subplot(gs[1, j])
-        err = np.abs(img - true_img) / (true_img + 1e-8)
+        # Normalize error relative to the peak true signal rather than local tiny background pixels
+        err = np.abs(img - true_img) / (true_img.max() + 1e-8)
         err = np.clip(err, 0, 2)
         im  = ax.imshow(err, cmap='RdYlGn_r', vmin=0, vmax=1)
         ax.set_title(f"% Error\n{title.split(chr(10))[0]}", fontsize=8)
@@ -205,8 +206,8 @@ def plot_images(pop, fronts, em_results, map_results,
     ax_bar = fig.add_subplot(gs[2, 3:])
     rmse_vals = []
     for img in imgs_disp:
-        rmse = np.sqrt(np.mean(((img - true_img) /
-                                (true_img + 1e-8))**2))
+        # NRMSE: Root Mean Square Error normalized globally by the maximum true signal
+        rmse = np.sqrt(np.mean((img - true_img)**2)) / (true_img.max() + 1e-8)
         rmse_vals.append(rmse)
     bar_colors = ['k', 'purple', 'blue', 'cyan', 'green', 'red']
     bars = ax_bar.bar([t.replace('\n', ' ') for t in titles],

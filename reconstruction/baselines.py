@@ -41,10 +41,12 @@ def map_reconstruction(sinogram, A, beta_vals=(0.1, 0.5, 1, 5, 10, 50),
 
         for _ in range(max_iter):
             y_bar = np.clip(A @ x, 1e-10, None)
-            grad_ll = A.T @ (y / y_bar - 1)
+            ratio = y / y_bar
             grad_pen = beta * 2 * x
-            step = 1.0 / (At1 + 2*beta + 1e-10)
-            x_new = np.clip(x + step * (grad_ll - grad_pen), 0, None)
+            
+            # One-Step-Late Multiplicative MAP (unconditionally stable)
+            x_new = x * (A.T @ ratio) / (At1 + grad_pen + 1e-10)
+            
             if np.mean(np.abs(x_new - x) / (np.abs(x) + 1e-10)) < tol:
                 break
             x = x_new

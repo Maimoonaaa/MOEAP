@@ -109,6 +109,22 @@ def hypervolume_2d(obj_values, front, ref=None):
 def simulated_binary_crossover(parent1, parent2, eta_c=20, p_cross=0.95):
     if np.random.rand() > p_cross:
         return parent1.copy(), parent2.copy()
+        
+    # 50% chance for Spatial Patch Crossover (anatomy-preserving)
+    if np.random.rand() < 0.5 and len(parent1.shape) == 2:
+        H, W = parent1.shape
+        c1, c2 = parent1.copy(), parent2.copy()
+        x1 = np.random.randint(0, W - W//4)
+        y1 = np.random.randint(0, H - H//4)
+        pw = np.random.randint(W//8, W//2)
+        ph = np.random.randint(H//8, H//2)
+        
+        patch_p1 = parent1[y1:y1+ph, x1:x1+pw].copy()
+        patch_p2 = parent2[y1:y1+ph, x1:x1+pw].copy()
+        c1[y1:y1+ph, x1:x1+pw] = patch_p2
+        c2[y1:y1+ph, x1:x1+pw] = patch_p1
+        return c1, c2
+
     u    = np.random.rand(*parent1.shape)
     beta = np.where(u <= 0.5,
                     (2*u)**(1/(eta_c+1)),
@@ -141,16 +157,30 @@ def poisson_ll_gradient(image, sinogram, system_matrix, scatter_randoms=None):
 
 def directed_mutation(image, sinogram, system_matrix, strength=0.01):
     """
-    Gradient step in the Poisson-LL direction + small Gaussian noise.
-    Gradient is L2-normalised to avoid exploding steps.
+    Gradient step in the Poisson-LL direction + TV smoothing + Multiplicative noise.
     """
+    from scipy.ndimage import gaussian_filter
+    
     grad      = poisson_ll_gradient(image, sinogram, system_matrix)
     grad_norm = np.linalg.norm(grad)
     if grad_norm > 1e-8:
         grad = grad / grad_norm
-    mutated  = image + strength * grad
-    mutated += np.random.randn(*image.shape) * strength * 0.05
-    upper    = max(5.0, image.mean() * 10)
+        
+    # Edge-preserving TV-like proxy: diffuse local noise
+    diffused  = gaussian_filter(image, sigma=1.0)
+    tv_pull   = diffused - image
+    tv_norm   = np.linalg.norm(tv_pull)
+    if tv_norm > 1e-8:
+        tv_pull = tv_pull / tv_norm
+        
+    # 80% Poisson LL ascent, 20% Structural TV diffusion
+    mutated  = image + strength * (0.8 * grad + 0.2 * tv_pull)
+    
+    # Introduce small multiplicative noise so dark areas stay clean
+    noise = np.random.uniform(0.95, 1.05, image.shape)
+    mutated = mutated * noise
+    
+    upper = max(5.0, image.mean() * 10)
     return np.clip(mutated, 0.0, upper)
 
 
@@ -201,18 +231,29 @@ class MOEAP:
         self.hv_history           = []   # hypervolume per gen (2-obj only)
         self.generation_snapshots = []   # (obj_P, pop, fronts) for external use
 
-        fbp = self._fbp_init()
-        self.population = [
-            np.clip(fbp + np.random.uniform(-0.1, 0.1, fbp.shape), 0.0, None)
-            for _ in range(self.N)
-        ]
+        seeds = self._fbp_init()
+        self.population = []
+        for i in range(self.N):
+            base_seed = seeds[i % len(seeds)]
+            # Multiplicative noise to preserve zero boundaries smoothly
+            noise = np.random.uniform(0.9, 1.1, base_seed.shape)
+            member = np.clip(base_seed * noise, 0.0, None)
+            self.population.append(member)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _fbp_init(self):
-        y  = self.sinogram.flatten()
+        from reconstruction.baselines import em_reconstruction
+        y = self.sinogram.flatten()
+        
         bp = self.A.T @ y
-        return (bp / (bp.max() + 1e-8)).reshape(self.H, self.W)
+        fbp = (bp / (bp.max() + 1e-8)).reshape(self.H, self.W)
+        
+        em_2 = em_reconstruction(y, self.A, n_iter=2)
+        em_5 = em_reconstruction(y, self.A, n_iter=5)
+        em_10 = em_reconstruction(y, self.A, n_iter=10)
+        
+        return [fbp, em_2, em_5, em_10]
 
     def _evaluate(self, img):
         vals = []
@@ -271,11 +312,11 @@ class MOEAP:
             parent_idx = self._select_parents(obj_P, fronts)
             Q = []
             for i in range(0, self.N, 2):
-                p1 = P[parent_idx[i]].flatten()
-                p2 = P[parent_idx[min(i+1, self.N-1)]].flatten()
+                p1 = P[parent_idx[i]].reshape(self.H, self.W)
+                p2 = P[parent_idx[min(i+1, self.N-1)]].reshape(self.H, self.W)
                 c1, c2 = simulated_binary_crossover(p1, p2, self.eta_c, self.p_cross)
-                c1 = directed_mutation(c1.reshape(self.H, self.W), self.sinogram, self.A)
-                c2 = directed_mutation(c2.reshape(self.H, self.W), self.sinogram, self.A)
+                c1 = directed_mutation(c1, self.sinogram, self.A)
+                c2 = directed_mutation(c2, self.sinogram, self.A)
                 Q.append(c1); Q.append(c2)
             Q = Q[:self.N]
 
