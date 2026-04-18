@@ -20,7 +20,9 @@ if __name__ == '__main__':
     from plots.visualize              import (plot_pareto_front, plot_images,
                                               plot_training_curves)
 
-    Path("results").mkdir(exist_ok=True)
+    import time
+    RESULTS_DIR = f"results/run_{time.strftime('%Y%m%d-%H%M%S')}"
+    Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
     # --- Configuration Toggle ---
     USE_REAL_DATA = False        # Toggle between Synthetic and Real datasets
@@ -57,7 +59,7 @@ if __name__ == '__main__':
                 train_model(h5_path=H5_PATH, objective_idx=i, epochs=80, save_dir=CKPT)
 
     # Plot training curves if history files exist
-    plot_training_curves(save_dir=CKPT, save_path="results/training_curves.png")
+    plot_training_curves(save_dir=CKPT, save_path=f"{RESULTS_DIR}/training_curves.png")
 
     device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cnn_models = load_models(save_dir=CKPT, device=device, ignore_fwhm=IGNORE_FWHM)
@@ -88,10 +90,10 @@ if __name__ == '__main__':
                   kktpm_every=10, kktpm_front_size=5)
 
     pop, obj_vals, fronts = moeap.run(verbose=True)
-    np.save("results/moeap_obj.npy",  obj_vals)
-    np.save("results/moeap_pop.npy",  np.array(pop))
-    np.save("results/kktpm_hist.npy", np.array(moeap.kktpm_history))
-    np.save("results/hv_hist.npy",    np.array(moeap.hv_history))
+    np.save(f"{RESULTS_DIR}/moeap_obj.npy",  obj_vals)
+    np.save(f"{RESULTS_DIR}/moeap_pop.npy",  np.array(pop))
+    np.save(f"{RESULTS_DIR}/kktpm_hist.npy", np.array(moeap.kktpm_history))
+    np.save(f"{RESULTS_DIR}/hv_hist.npy",    np.array(moeap.hv_history))
 
     # ── Step 4: R-MOEAP ───────────────────────────────────────────────────────
     print("\n=== Running R-MOEAP ===")
@@ -101,7 +103,7 @@ if __name__ == '__main__':
                     reference_points=[ref_pt], epsilon=0.05,
                     pop_size=50, max_gen=100, img_size=IMG_SIZE)
     r_pop, r_obj, r_fronts = rmoeap.run(verbose=True)
-    np.save("results/rmoeap_obj.npy", r_obj)
+    np.save(f"{RESULTS_DIR}/rmoeap_obj.npy", r_obj)
 
     # ── Step 5: KKTPM on final front ──────────────────────────────────────────
     print("\n=== Computing final KKTPM ===")
@@ -114,8 +116,8 @@ if __name__ == '__main__':
         [pop[i] for i in front_idx],
         eval_fn, h=1e-3, n_sample=80)
     kktpm_summary(kktpm_vals)
-    np.save("results/kktpm_final.npy",  kktpm_vals)
-    np.save("results/lambdas_final.npy", lambdas)
+    np.save(f"{RESULTS_DIR}/kktpm_final.npy",  kktpm_vals)
+    np.save(f"{RESULTS_DIR}/lambdas_final.npy", lambdas)
 
     print("\n=== Running baselines ===")
     em_results  = em_with_smoothing(sinogram, A)
@@ -131,11 +133,11 @@ if __name__ == '__main__':
         kktpm_full_history=moeap.kktpm_full_history,
         hv_history=moeap.hv_history,
         obj_history=moeap.obj_history,
-        save_path="results/pareto_front.png"
+        save_path=f"{RESULTS_DIR}/pareto_front.png"
     )
 
     plot_images(pop, fronts, em_results, map_results, true_img,
                 sinogram=sinogram, A=A,
-                save_path="results/reconstruction_images.png")
+                save_path=f"{RESULTS_DIR}/reconstruction_images.png")
 
-    print("\n=== Done! Results saved to results/ ===")
+    print(f"\n=== Done! Results saved to {RESULTS_DIR}/ ===")

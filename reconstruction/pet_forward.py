@@ -38,11 +38,20 @@ def make_system_matrix(img_size=64, n_angles=60, n_detectors=None):
     return A
 
 
-def simulate_sinogram(true_image, A, n_events=8e4, scatter_frac=0.1):
+def simulate_sinogram(true_image, A, n_events=5e6, scatter_frac=0.1):
     y_mean = A @ true_image.flatten()
-    y_mean = y_mean / (y_mean.sum() + 1e-10) * n_events
-    scatter = scatter_frac * y_mean.mean() * np.ones_like(y_mean)
-    y_mean_total = y_mean + scatter
+    true_sum = y_mean.sum() + 1e-10
+    scale_factor = n_events / true_sum
+    
+    y_mean_scaled = y_mean * scale_factor
+    scatter_scaled = scatter_frac * y_mean_scaled.mean() * np.ones_like(y_mean_scaled)
+    y_mean_total = y_mean_scaled + scatter_scaled
+    
     y_noisy = np.random.poisson(y_mean_total).astype(float)
-    return y_noisy.reshape(A.shape[0]), scatter
+    
+    # Scale back to true physical intensity space for mathematical stability
+    y_physical = y_noisy / scale_factor
+    scatter_physical = scatter_scaled / scale_factor
+    
+    return y_physical.reshape(A.shape[0]), scatter_physical
 
