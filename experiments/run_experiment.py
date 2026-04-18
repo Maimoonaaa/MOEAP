@@ -10,7 +10,7 @@ import torch
 from pathlib import Path
 
 if __name__ == '__main__':
-    from data.generate_dataset       import generate_dataset, make_phantom, insert_lesion
+    from data.generate_dataset       import generate_dataset, make_phantom, insert_lesion, load_real_slices
     from models.cnn_objectives        import train_model, load_models
     from reconstruction.pet_forward   import make_system_matrix, simulate_sinogram
     from reconstruction.baselines     import em_with_smoothing, map_reconstruction
@@ -22,39 +22,63 @@ if __name__ == '__main__':
 
     Path("results").mkdir(exist_ok=True)
 
+    # --- Configuration Toggle ---
+    USE_REAL_DATA = False        # Toggle between Synthetic and Real datasets
+    IGNORE_FWHM = False
+    FORCE_SKIP_TRAINING = False  # Set to True to completely skip training
+
+    if USE_REAL_DATA:
+        H5_PATH = "data/pet_dataset_real.h5"
+        CKPT = "models/checkpoints_real"
+        REAL_NIFTI_DIR = "data/nifti_slices"
+    else:
+        H5_PATH = "data/pet_dataset_synthetic.h5"
+        CKPT = "models/checkpoints_synthetic"
+        REAL_NIFTI_DIR = None
+
     # ── Step 0: dataset ───────────────────────────────────────────────────────
-    print("=== Generating dataset ===")
-    # generate_dataset(n=3_000, use_pet_noise=True)
-    # To use real TCIA NIfTI slices instead, run:
-    generate_dataset(n=10_000, real_nifti_dir="data/nifti_slices/")
+    h5_path = Path(H5_PATH)
+    if h5_path.exists():
+        print(f"=== Dataset {h5_path} already exists — skipping generation ===")
+    else:
+        print("=== Generating dataset ===")
+        generate_dataset(n=10_000, save_path=H5_PATH, real_nifti_dir=REAL_NIFTI_DIR)
 
     # ── Step 1: CNN models ────────────────────────────────────────────────────
-    CKPT = "models/checkpoints"
-    needed = [Path(CKPT) / f"{n}_best.pt"
-              for n in ["inv_rmse", "nsnr", "inv_fwhm"]]
-    if all(f.exists() for f in needed):
-        print("\n=== Checkpoints found — skipping training ===")
+    train_objs = ["inv_rmse", "nsnr"] if IGNORE_FWHM else ["inv_rmse", "nsnr", "inv_fwhm"]
+    needed = [Path(CKPT) / f"{n}_best.pt" for n in train_objs]
+    
+    if FORCE_SKIP_TRAINING or all(f.exists() for f in needed):
+        print("\n=== Skipping training phase ===")
     else:
-        print("\n=== Training ResNet CNN objective models ===")
-        for i in range(3):
-            train_model(objective_idx=i, epochs=80)
+        print(f"\n=== Training ResNet CNN objective models in {CKPT} ===")
+        for i, obj in enumerate(["inv_rmse", "nsnr", "inv_fwhm"]):
+            if obj in train_objs:
+                train_model(h5_path=H5_PATH, objective_idx=i, epochs=80, save_dir=CKPT)
 
     # Plot training curves if history files exist
     plot_training_curves(save_dir=CKPT, save_path="results/training_curves.png")
 
     device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cnn_models = load_models(save_dir=CKPT, device=device)
+    cnn_models = load_models(save_dir=CKPT, device=device, ignore_fwhm=IGNORE_FWHM)
     print(f"  Models loaded on {device}")
 
     # ── Step 2: PET forward model and data ────────────────────────────────────
     print("\n=== Simulating PET data ===")
-    IMG_SIZE = 64
-    A = make_system_matrix(img_size=IMG_SIZE, n_angles=60)
+    IMG_SIZE = 128
+    A = make_system_matrix(img_size=IMG_SIZE, n_angles=180)
 
-    true_img, organ_mask = make_phantom(IMG_SIZE)
+    if USE_REAL_DATA:
+        real_slices = load_real_slices(REAL_NIFTI_DIR, target_size=IMG_SIZE)
+        # Pick a median slice to ensure it's solidly inside the body cavity
+        true_img = real_slices[len(real_slices) // 2]
+        organ_mask = true_img > (true_img.mean() * 0.6)
+    else:
+        true_img, organ_mask = make_phantom(IMG_SIZE)
+    
     true_img, lesion_mask, _ = insert_lesion(true_img, organ_mask,
                                               contrast=3.0, radius_px=5, hot=True)
-    sinogram, scatter = simulate_sinogram(true_img, A, n_events=8e4)
+    sinogram, scatter = simulate_sinogram(true_img, A, n_events=5e6)
 
     # ── Step 3: MOEAP ─────────────────────────────────────────────────────────
     print("\n=== Running MOEAP ===")

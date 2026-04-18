@@ -4,3 +4,4 @@
 *.pkl
 data/
 outputs/
+.venv/

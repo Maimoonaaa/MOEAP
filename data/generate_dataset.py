@@ -29,7 +29,7 @@ from scipy.sparse import csr_matrix
 from pathlib import Path
 import h5py
 
-IMG_SIZE  = 64
+IMG_SIZE  = 128
 N_IMAGES  = 10_000
 rng = np.random.default_rng(42)
 
@@ -152,8 +152,8 @@ def _make_system_matrix(img_size=IMG_SIZE, n_angles=30):
     return A.multiply(1.0 / rs[:, None])
 
 
-# Build once at module import — lightweight (30 angles)
-_A_SMALL = _make_system_matrix(IMG_SIZE, n_angles=30)
+# Build once at module import — dense (180 angles for high fidelity)
+_A_SMALL = _make_system_matrix(IMG_SIZE, n_angles=180)
 
 
 def pet_noise_reconstruction(true_img, n_events=5e4, scatter_frac=0.1):
@@ -334,7 +334,8 @@ def generate_dataset(n=N_IMAGES,
 
         # ── Step 5: noise ─────────────────────────────────────────────────────
         if use_pet_noise:
-            n_events = rng.choice([2e4, 5e4, 8e4, 1.5e5])
+            # Scaled up n_events to heavily reduce Poisson shot noise for 128x128
+            n_events = rng.choice([5e5, 1e6, 2e6, 5e6])
             noisy    = pet_noise_reconstruction(true_img, n_events=n_events)
         else:
             # Fallback: gamma noise (fast but less realistic)
